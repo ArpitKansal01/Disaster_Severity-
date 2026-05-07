@@ -60,46 +60,78 @@ def compute_entropy(logits):
     entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
     return entropy.item()
 
-ENTROPY_THRESHOLD = 1.0
 
 # ============================
-# 6️⃣ Prediction Function
+# 6️⃣ Prediction Function (STRICT APPROVAL)
 # ============================
-def predict_disaster_severity_with_threshold(image: Image.Image):
+
+STRICT_ENTROPY_THRESHOLD = 0.4
+CONFIDENCE_THRESHOLD = 0.75
+
+def predict_disaster_severity_strict(image: Image.Image):
     img_tensor = inference_transform(image).unsqueeze(0).to(device)
+
     with torch.no_grad():
         type_out, sev_out = model(img_tensor)
-        
+
+        # entropy
         type_entropy = compute_entropy(type_out)
         sev_entropy = compute_entropy(sev_out)
-        
-        pred_type_idx = torch.argmax(type_out, dim=1).item()
-        pred_sev_idx = torch.argmax(sev_out, dim=1).item()
-        
-        pred_type = disaster_types[pred_type_idx] if type_entropy <= ENTROPY_THRESHOLD else "uncertain"
-        pred_sev = severity_levels[pred_sev_idx] if sev_entropy <= ENTROPY_THRESHOLD else "uncertain"
 
-    return pred_type, pred_sev, type_entropy, sev_entropy
+        # confidence
+        type_probs = F.softmax(type_out, dim=1)
+        sev_probs = F.softmax(sev_out, dim=1)
 
+        type_conf = torch.max(type_probs).item()
+        sev_conf = torch.max(sev_probs).item()
+
+        # predicted indices
+        pred_type_idx = torch.argmax(type_probs, dim=1).item()
+        pred_sev_idx = torch.argmax(sev_probs, dim=1).item()
+
+        # STRICT APPROVAL CONDITION
+        if (
+            type_entropy <= STRICT_ENTROPY_THRESHOLD and
+            sev_entropy <= STRICT_ENTROPY_THRESHOLD and
+            type_conf >= CONFIDENCE_THRESHOLD and
+            sev_conf >= CONFIDENCE_THRESHOLD
+        ):
+            status = "approved"
+            pred_type = disaster_types[pred_type_idx]
+            pred_sev = severity_levels[pred_sev_idx]
+        else:
+            status = "rejected"
+            pred_type = "uncertain"
+            pred_sev = "uncertain"
+
+    return {
+        "predicted_disaster": pred_type,
+        "predicted_severity": pred_sev,
+        "type_entropy": round(type_entropy, 4),
+        "severity_entropy": round(sev_entropy, 4),
+        "type_confidence": round(type_conf, 4),
+        "severity_confidence": round(sev_conf, 4),
+        "status": status
+    }
 # ============================
 # 7️⃣ API Endpoint
 # ============================
+
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         img = Image.open(io.BytesIO(contents)).convert("RGB")
-        pred_type, pred_sev, type_entropy, sev_entropy = predict_disaster_severity_with_threshold(img)
-        
-        result = {
-            "predicted_disaster": pred_type,
-            "predicted_severity": pred_sev,
-            "type_entropy": round(type_entropy, 4),
-            "severity_entropy": round(sev_entropy, 4)
-        }
+
+        result = predict_disaster_severity_strict(img)
+
         return JSONResponse(content=result)
+
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=400)
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=400
+        )
 
 @app.get("/")
 async def root():
